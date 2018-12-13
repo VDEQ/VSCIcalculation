@@ -1,0 +1,258 @@
+---
+title: "How To Run the VSCI"
+author: "Emma Jones"
+date: "November 14, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=TRUE}
+library(tidyverse)
+library(readxl)
+```
+
+
+## Setup
+
+This code was built in R version 3.5.1. It was modified from code by Lou Reynolds and Leah Ettema (USEPA). 
+
+The script walks users through the data manipulation steps necessary to run the Family level Virginia Stream Condition Index (VSCI). After initial data manipulation, rarification, and VSCI calculation, the script subsets the pre-rarified samples to demonstrate R and EDAS are generating the same VSCI results.
+
+
+## Family Level VSCI Calculation
+
+Start by bringing in the rarification function and VSCI metrics. These are saved in two separate files to keep the scripts organized.
+
+```{r}
+# Bring in rarify function from file
+source('rarifyFunction.R')
+
+# Bring in VSCI functions
+source('VSCI_metrics_GENUS.R')
+```
+
+
+### Master Taxa List
+
+Fist, bring in the Genus level Master Taxa list from EDAS. This list has been updated by Drew Miller and Emma Jones (VDEQ) to include  changes necessary to successfully connect Genus level data back to Family level tolerance values to accurately calculate the Family level VSCI. The next step is to isolate the Final VA  Family ID (Family level taxa names) and FinalID (Genus level taxa names) to eventually build a bridge from Genus level data to Family level data. 
+
+**Disclaimer: The Benthics_Master_Taxa_EVJ_RDM.xlsx is a working iteration of the Genus Master Taxa List. This sheet is not fully approved by VDEQ biologists or management. We use this sheet as a bridge from Genus level data to Family level data. All associated tolerance values in the Genus Master taxa list are not approved and should be ignored.**
+
+```{r masterTaxaGenusLevel}
+masterTaxaGenus <- read_excel('data/Benthics_Master_Taxa_EVJ_RDM.xlsx','Benthics_Master_Taxa_111418')
+
+edas_options <- select(masterTaxaGenus, Class, Order, Family, `Final VA Family ID`, FinalID)
+edas_list <- select(edas_options, `Final VA Family ID`,FinalID)
+
+```
+
+From the Genus level Master taxa list, we identify all potential Genus, Family, Order, and Class taxa names. For Family and higher taxonomic levels we need to add (unknown) to each taxa name so they can be found with or without the (unknown) designation. This step will not be necessary after a full EDAS cleanup where FinalID's are forced to match accurate names in the Family and Genus level Master Taxa lists.
+
+This step allows the code to identify when a taxa is left at a taxonomic level higher than Family to ease excluding taxa  in taxa richness calculations.
+
+```{r taxonomicLevels}
+# for Excluding taxa, need a list of all Family level designations that may end up as a FinalID
+# these are all unique Family names and the few taxa that are the only 
+GenusNames <- c(unique(edas_options$FinalID)[!is.na(unique(edas_options$FinalID))])
+FamilyNames <- c(unique(edas_options$Family)[!is.na(unique(edas_options$Family))],
+                 paste(unique(edas_options$Family)[!is.na(unique(edas_options$Family))],'(unknown)',sep=' '))
+OrderNames <- c(unique(edas_options$Order)[!is.na(unique(edas_options$Order))],
+                paste(unique(edas_options$Order)[!is.na(unique(edas_options$Order))],'(unknown)',sep=' '))
+ClassNames <- unique(edas_options$Class)[!is.na(unique(edas_options$Class))]
+
+```
+
+
+### Family Master Taxa List
+
+Since tolerance values for taxa at the Family level between the Family Master Taxa list and Genus master Taxa list, it is safest to utilize the Family level Master taxa list to calculate the VSCI. We bring in that table (exported from EDAS to Excel)  and identify certain Families, Orders, and functional feeding group designations to create metrics based on traits. 
+
+The dataset is transformed from wide to long format, certain taxa names are changed, and column names changed to avoid issues joining Family master taxa list to the Genus level data. These and other taxa name changes later in the script could be fixed with an update to the Family Master Taxa list.
+
+
+```{r familyMasterTaxaList}
+vmast <- read_excel("data/VA_Family_Master_Taxa.xlsx", "VA_Family_Master_Taxa") %>% 
+  mutate(e=ifelse(Order=="Ephemeroptera", 1, 0),
+         p=ifelse(Order=="Plecoptera",1,0),
+         t=ifelse(Order=="Trichoptera", 1, 0),
+         tmin=ifelse(Order=="Trichoptera" & Family != "Hydropsychidae", 1, 0), 
+         ept=ifelse(e+p+t>0,1,0), 
+         scraper = ifelse(FFG=="Scraper", 1, 0),
+         chiro = ifelse(Family=="Chironomidae (A)" | Family=="Chironomidae (B)",1, 0),
+         ptmin = ifelse(p+tmin>0,1,0)) %>% 
+  # Then put it in long format so it can be merged to and input taxa list
+  select(FinalFamID,TolVal, e,p,t, ept,ptmin, scraper, chiro) %>% 
+  filter(!is.na(FinalFamID)) %>% 
+  gather(key=metric, value=metric_val, -FinalFamID)%>% 
+  filter(!is.na(metric_val)) %>% # my change to get Hilsenhoff Index calculations to work, need 0s
+  
+  # new step, recode some FinalFamID's to match real options in FinalID
+  mutate(FinalFamID = recode(FinalFamID,
+                             'Hydracarina (unknown)' = 'Hydracarina',
+                             'Lumbriculidae' = 'Lumbriculidae (unknown)',
+                             'Hirudinidae' = 'Hirudinidae (unknown)')) %>%
+
+  
+  # new step, rename FinalFamID to work with edas_list built off Genus level master taxa list
+  rename(`Final VA Family ID` = 'FinalFamID')
+
+```
+
+```{r howToRunWhenToleranceValuesUpdated, include = FALSE}
+# This is how I wanted to do vmast from Benthics Table, but I won't be able to match Family VSCI scores
+# if I introduce this other level of complexity with different tolerance values.
+# For now I need to just use vmast built off Family level bc there will be no tolerance value isses
+
+#vmast <- read_excel('data/Benthics_Master_Taxa_EVJ_RDM.xlsx','Benthics_Master_Taxa') %>% # Emma's version
+#  select(Phylum, Class, Order, Family, `Final VA Family ID` ,FinalID, TolVal, FFG) %>%
+#  mutate(e=ifelse(Order=="Ephemeroptera", 1, 0),
+#         p=ifelse(Order=="Plecoptera",1,0),
+#         t=ifelse(Order=="Trichoptera", 1, 0),
+#         tmin=ifelse(Order=="Trichoptera" & Family != "Hydropsychidae", 1, 0), 
+#         ept=ifelse(e+p+t>0,1,0), 
+#         scraper = ifelse(FFG=="Scraper", 1, 0),
+#         chiro = ifelse(Family=="Chironomidae (A)" | Family=="Chironomidae (B)",1, 0),
+#         ptmin = ifelse(p+tmin>0,1,0)) %>% 
+#  # Then put it in long format so it can be merged to and input taxa list
+#  select(FinalID,TolVal, e,p,t, ept,ptmin, scraper, chiro) %>% 
+#  filter(!is.na(FinalID)) %>% 
+#  gather(key=metric, value=metric_val, -FinalID)%>% 
+#  filter(!is.na(metric_val)) %>% # my change to get Hilsenhoff Index calculations to work, need 0s
+#  #filter(metric_val>0) %>% # Lou's original code
+#  # Now merge traits back to the full master taxa list
+#  left_join(edas_list, by="FinalID") 
+
+```
+
+### Bring in Genus Level Data
+
+Next, bring in the Benthics table from EDAS (exported to Excel workbook so you don't need to switch to 32 bit R). We run the raw data through the rarification function. **Note: the rarification function checks the total bug count on all sites fed to it. This is a great initial QA, but it will be important to not feed the entire database to the function after all the QA work is done as it takes a long time to resample all sites > 110 bugs. When QA done (removed/fixed all R110's that have >110 or were resampled even though initial sample didn't have >110 bugs), will need to build a wrapper function that assesses whether or not R110 in a BenSampID and split database into paired samples (original and R110 version) that don't need to be resampled and sites that are new and do need to be rarified.
+
+**Rarifying dataset of this size takes a considerable amount of time. Run at own risk.** 
+
+Skip this chunk and start working with pre-rarified data in genusDataRare chunk.
+
+
+```{r genusData, include=FALSE}
+genusDataRaw <- readxl::read_excel("data/Benthics.xlsx", "Benthics") %>%
+  filter(RepNum == 1)  # keep only Rep1's
+
+time1 <- Sys.time()
+genusDataRare <- rarify(genusDataRaw, UID = 'BenSampID', finalID = "FinalID", count = 'Individuals')
+Sys.time()-time1
+```  
+  
+  
+```{r genusDataRare}
+EDASrare <- readxl::read_excel("data/Benthics.xlsx", "Benthics") %>%
+  filter(str_detect(BenSampID, 'R110') & RepNum == 1) %>% # keep only rarified data and Rep1's
+  mutate(Count = Individuals, # Rename to match formatting of functions
+         `Excluded Taxa` = ifelse(`Excluded Taxa` == T, -1, 0)) %>% 
+  select(BenSampID, FinalID, Count, `Excluded Taxa`) %>%
+  # Fix FinalID naming issues (unclear Family designation or only Genus in VA range)
+  mutate(FinalID = recode(FinalID, Pisidiidae = 'Pisidiidae (unknown)',
+                          Uenoidae = 'Neophylax',
+                          Siphlonuridae = 'Siphlonurus',
+                          Rhyacophilidae = 'Rhyacophila')) %>%
+  mutate(GenusTaxaLevel = ifelse(FinalID %in% GenusNames, T, F),
+         FamilyTaxaLevel = ifelse(FinalID %in% FamilyNames, T, F),
+         OrderTaxaLevel = ifelse(FinalID %in% OrderNames, T, F),
+         ClassTaxaLevel = ifelse(FinalID %in% ClassNames, T, F))
+```
+  
+So working with just rarified Genus level data here, need to work back to Family level to get correct tolerance values associated with correct taxa. 
+
+```{r upLevel}
+# Work FinalID back up to Family Level
+EDASrare2 <- left_join(EDASrare,edas_list, by="FinalID") 
+
+EDASrare2Fine <- filter(EDASrare2, !is.na(`Final VA Family ID`))
+
+EDASrare2Fix <- filter(EDASrare2, is.na(`Final VA Family ID`)) %>%
+  select(-`Final VA Family ID`) %>%
+  mutate(FinalID = paste(FinalID,'(unknown)',sep=' '))%>%
+  left_join(edas_list, by="FinalID") %>%
+  bind_rows(EDASrare2Fine) %>%
+  arrange(BenSampID)
+
+
+EDASrare3 <- rename(EDASrare2Fix, `Genus Level Excluded Taxa` = `Excluded Taxa`)
+```
+
+We also need to do a little data manipulation to incorporate biologist exclusion information appropriately.
+
+```{r exclusionMath}
+exclusionMath  <- EDASrare3 %>%
+  mutate(`Family Level Excluded Taxa` = 
+           ifelse(`Genus Level Excluded Taxa` == -1, ifelse(`OrderTaxaLevel` == TRUE | `ClassTaxaLevel` == TRUE , -1, 0), 0 )) %>%
+  # had to get super ifelse nesty here to make this logic work, ugly but works
+  group_by(BenSampID, `Final VA Family ID`) %>%
+  summarise(`Family Level Count` = sum(Count), 
+            #`Genus Level Excluded Taxa` = sum(`Genus Level Excluded Taxa`),
+            `Family Level Taxa` = n(),
+            `Family Level Excluded Taxa` = sum(`Family Level Excluded Taxa`),
+            `Final Family Level Taxa` = `Family Level Taxa` + sum(`Family Level Excluded Taxa`) )
+```
+
+Now that the taxa data will play nicely with the bug traits, we join them. 
+
+```{r bugTraits join}
+bugTraits <- left_join(exclusionMath,vmast,by=c('Final VA Family ID') )
+```
+
+Now run the VSCI.
+
+```{r VSCI}
+final <- VSCIcalculation(bugTraits,exclusionMath,vmast)
+```
+
+Time to check against real VSCI results.
+
+```{r realResults}
+EDASresults <- readxl::read_excel("data/Family Metrics VSCI Calculation.xlsx",'Family_Metrics_VSCI_Calculation') 
+
+EDASresultsSub <- filter(EDASresults, BenSampID %in% unique(final$BenSampID))
+```
+
+Quick function to make comparison easier.
+  
+```{r checkFunction}
+oneForOne <- function(df,metricName){
+  z <- mutate_(df, realValue = interp(~v, v= as.name(paste(metricName,'.y',sep='')))) %>%
+    mutate_(newValue = interp(~v, v= as.name(paste(metricName,'.x',sep='')))) %>%
+    mutate(diff = round(realValue - newValue,digits = 3)) %>%
+    select(BenSampID,diff)
+  names(z) <- c('BenSampID',paste(metricName,'_diff',sep=''))
+  return(z)
+}
+#oneForOne(finalVSCI,'%Ephem')
+```
+  
+QA results:  
+```{r}
+finalVSCI <- left_join(final,EDASresultsSub,by="BenSampID")
+comparison <- mutate(finalVSCI, FamilyTotalTaxa_diff = FamTotTaxa - `Family Total Taxa`,
+                     FamilyEPTTaxa_diff = FamEPTTax - `Family EPT Taxa`,
+                     FamilyScraper_diff = `Fam%Scrap` - `%FamilyScraper`,
+                     Family2Dom_diff = `Fam%2Dom` - `Family %2 Dominant`,
+                     FamilyHBIScore_diff = FamHBI - `Family HBI`) %>%
+  left_join(oneForOne(finalVSCI,'%Ephem')) %>%
+  left_join(oneForOne(finalVSCI,'%Chiro')) %>%
+  left_join(oneForOne(finalVSCI,'%PT - Hydropsychidae')) %>%
+  left_join(oneForOne(finalVSCI,'%Ephem Score')) %>%
+  left_join(oneForOne(finalVSCI,'%PT-H Score')) %>%
+  left_join(oneForOne(finalVSCI,'Fam Richness Score')) %>%
+  left_join(oneForOne(finalVSCI,'Fam SCI')) %>%
+  select(BenSampID, ends_with('_diff'))
+
+#More QA
+comparisonIssues <- filter(comparison, `Fam SCI_diff` != 0)
+comparisonIssues1 <- filter(comparison, `Fam SCI_diff` >1 | `Fam SCI_diff` < -1)
+
+VSCIproblems <- filter(final, BenSampID %in% comparisonIssues$BenSampID)
+
+```
+
+  
+Six known issues that are on data entry side. Need to fix taxa lists and will avoid calculation problems. Problems arise from data entry errors or sites deleted from some tables in EDAS but not others. Using R tool helps identify where errors in data occur.  
+  
+  
